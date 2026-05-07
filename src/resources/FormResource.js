@@ -41,10 +41,7 @@ module.exports = function (router) {
   // If the last argument is a function, hook.alter assumes it is a callback function.
   const FormResource = hook.alter('FormResource', Resource, null);
 
-  return FormResource(router, '', 'form', router.formio.mongoose.model('form'),
-   router.formio.mongoFeatures?.collation
-    ? { collation: { locale: 'en', strength: 2 } }
-    : {}).rest(
+  return FormResource(router, '', 'form', router.formio.mongoose.model('form')).rest(
     hook.alter('formRoutes', {
       before: [
         (req, res, next) => {
@@ -70,6 +67,17 @@ module.exports = function (router) {
           next();
         },
         router.formio.middleware.filterIdCreate,
+        (req, res, next) => {
+          if (req.body) {
+            if (req.params.formId) {
+              req.body._id = req.params.formId;
+            }
+            else {
+              delete req.body._id;
+            }
+          }
+          return next();
+        },
         router.formio.middleware.filterMongooseExists({ field: 'deleted', isNull: true }),
         router.formio.middleware.bootstrapEntityOwner,
         router.formio.middleware.formHandler,
