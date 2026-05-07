@@ -5331,6 +5331,113 @@ module.exports = function (app, template, hook) {
             });
         });
       });
+
+      describe('Reference select with VM-evaluated logic action', () => {
+        let petSubmissionId = null;
+        before('sets up a pets resource and a parent form with a custom logic action', (done) => {
+          helper
+            .form('pets', [
+              {
+                label: 'Pet',
+                key: 'pet',
+                type: 'textfield',
+                input: true,
+              },
+            ])
+            .submission('pets', { pet: 'Turtle' })
+            .execute((err) => {
+              if (err) {
+                return done(err);
+              }
+              petSubmissionId = helper.getLastSubmission()._id;
+              helper
+                .form('patchReferenceLogic', [
+                  {
+                    type: 'textfield',
+                    label: 'Text Field',
+                    key: 'textField',
+                    input: true,
+                  },
+                  {
+                    type: 'select',
+                    label: 'Pet',
+                    key: 'pet',
+                    dataSrc: 'resource',
+                    data: { resource: helper.template.forms['pets']._id },
+                    template: '<span>{{ item.data.pet }}</span>',
+                    reference: true,
+                    input: true,
+                    // The mere presence of a customAction triggers the bug —
+                    // the script body itself is irrelevant; what matters is
+                    // that args round-trip through the VM's structured clone.
+                    logic: [
+                      {
+                        name: 'noop',
+                        trigger: {
+                          type: 'javascript',
+                          javascript: 'result = data.textField',
+                        },
+                        actions: [
+                          {
+                            name: 'console',
+                            type: 'customAction',
+                            customAction: 'console.log("noop")',
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ])
+                .submission('patchReferenceLogic', {
+                  textField: 'initial',
+                  pet: { _id: petSubmissionId, form: helper.template.forms['pets']._id },
+                })
+                .execute(done);
+            });
+        });
+
+        it('preserves the reference _id as a valid ObjectId hex string after PATCH', (done) => {
+          const submission = helper.getLastSubmission();
+          helper.patchSubmission(
+            submission,
+            [{ op: 'replace', path: '/data/textField', value: 'updated' }],
+            (err) => {
+              if (err) {
+                return done(err);
+              }
+              const patched = helper.getLastSubmission();
+              assert.equal(patched.data.textField, 'updated');
+              assert.equal(
+                typeof patched.data.pet._id,
+                'string',
+                'pet._id should be a string in the response, not a wrapped {buffer} object',
+              );
+              assert.match(
+                patched.data.pet._id,
+                /^[0-9a-f]{24}$/,
+                'pet._id should be a 24-character hex ObjectId string',
+              );
+              assert.equal(patched.data.pet._id, petSubmissionId);
+              // GET re-hydrates from the stored reference. If the stored _id
+              // were a `{buffer: BinData}` plain doc instead of an ObjectId,
+              // the lookup would fail and the response would expose that shape.
+              helper.getSubmission(
+                'patchReferenceLogic',
+                patched._id,
+                (err, fromGet) => {
+                  if (err) {
+                    return done(err);
+                  }
+                  assert.equal(typeof fromGet.data.pet._id, 'string');
+                  assert.match(fromGet.data.pet._id, /^[0-9a-f]{24}$/);
+                  assert.equal(fromGet.data.pet._id, petSubmissionId);
+                  done();
+                },
+              );
+            },
+          );
+        });
+      });
     });
 
     describe('Filtering submissions', () => {
@@ -7649,6 +7756,234 @@ module.exports = function (app, template, hook) {
           });
           helper.deleteSubmission(helper.lastSubmission, undefined, undefined, done);
         });
+    });
+
+    describe('Submission IDOR Protection', () => {
+      let idorForm = null;
+      let submissionA = null;
+      let submissionB = null;
+
+      it('Should create a form for submission IDOR tests', (done) => {
+        request(app)
+          .post(hook.alter('url', '/form', template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            title: 'IDOR Submission Form',
+            name: 'idorSubmissionForm',
+            path: 'idor/submission-form',
+            type: 'form',
+            access: [
+              {
+                type: 'read_all',
+                roles: [template.roles.authenticated._id.toString()],
+              },
+            ],
+            submissionAccess: [
+              {
+                type: 'create_own',
+                roles: [template.roles.authenticated._id.toString()],
+              },
+              {
+                type: 'read_own',
+                roles: [template.roles.authenticated._id.toString()],
+              },
+              {
+                type: 'update_own',
+                roles: [template.roles.authenticated._id.toString()],
+              },
+            ],
+            components: [
+              {
+                type: 'textfield',
+                key: 'name',
+                label: 'Name',
+                input: true,
+              },
+            ],
+          })
+          .expect('Content-Type', /json/)
+          .expect(201)
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            idorForm = res.body;
+            template.users.admin.token = res.headers['x-jwt-token'];
+            done();
+          });
+      });
+
+      it('Should create Submission A', (done) => {
+        request(app)
+          .post(hook.alter('url', `/form/${idorForm._id}/submission`, template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            data: {
+              name: 'Submission A',
+            },
+          })
+          .expect('Content-Type', /json/)
+          .expect(201)
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            submissionA = res.body;
+            template.users.admin.token = res.headers['x-jwt-token'];
+            done();
+          });
+      });
+
+      it('Should create Submission B', (done) => {
+        request(app)
+          .post(hook.alter('url', `/form/${idorForm._id}/submission`, template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            data: {
+              name: 'Submission B',
+            },
+          })
+          .expect('Content-Type', /json/)
+          .expect(201)
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            submissionB = res.body;
+            template.users.admin.token = res.headers['x-jwt-token'];
+            done();
+          });
+      });
+
+      it('Should not allow POST /form/:formId/submission with a spoofed _id to overwrite an existing submission', (done) => {
+        request(app)
+          .post(hook.alter('url', `/form/${idorForm._id}/submission`, template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            data: {
+              name: 'Spoofed Submission',
+            },
+            _id: submissionB._id,
+          })
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            if (res.statusCode === 201) {
+              assert.notEqual(res.body._id, submissionB._id);
+            }
+            if (res.headers['x-jwt-token']) {
+              template.users.admin.token = res.headers['x-jwt-token'];
+            }
+
+            // Verify Submission B was NOT modified.
+            request(app)
+              .get(hook.alter('url', `/form/${idorForm._id}/submission/${submissionB._id}`, template))
+              .set('x-jwt-token', template.users.admin.token)
+              .expect('Content-Type', /json/)
+              .expect(200)
+              .end((err, res) => {
+                if (err) {
+                  return done(err);
+                }
+
+                assert.equal(res.body._id, submissionB._id);
+                assert.equal(res.body.data.name, 'Submission B');
+                template.users.admin.token = res.headers['x-jwt-token'];
+                done();
+              });
+          });
+      });
+
+      it('Should not allow PUT /form/:formId/submission/:subId with a spoofed _id to target a different submission', (done) => {
+        request(app)
+          .put(hook.alter('url', `/form/${idorForm._id}/submission/${submissionA._id}`, template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            data: {
+              name: 'IDOR Hijack Attempt',
+            },
+            _id: submissionB._id,
+          })
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            if (res.statusCode === 200) {
+              assert.equal(res.body._id, submissionA._id);
+            }
+            if (res.headers['x-jwt-token']) {
+              template.users.admin.token = res.headers['x-jwt-token'];
+            }
+
+            // Verify Submission B was NOT modified.
+            request(app)
+              .get(hook.alter('url', `/form/${idorForm._id}/submission/${submissionB._id}`, template))
+              .set('x-jwt-token', template.users.admin.token)
+              .expect('Content-Type', /json/)
+              .expect(200)
+              .end((err, res) => {
+                if (err) {
+                  return done(err);
+                }
+
+                assert.equal(res.body._id, submissionB._id);
+                assert.equal(res.body.data.name, 'Submission B');
+                template.users.admin.token = res.headers['x-jwt-token'];
+                done();
+              });
+          });
+      });
+
+      it('Should not allow PUT /form/:formId/submission/:subId with a spoofed form to target a different form', (done) => {
+        request(app)
+          .put(hook.alter('url', `/form/${idorForm._id}/submission/${submissionA._id}`, template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            data: {
+              name: 'Form Hijack Attempt',
+            },
+            form: template.forms.adminRegister._id,
+          })
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            if (res.statusCode === 200) {
+              assert.equal(res.body._id, submissionA._id);
+              assert.equal(res.body.form, idorForm._id);
+            }
+            if (res.headers['x-jwt-token']) {
+              template.users.admin.token = res.headers['x-jwt-token'];
+            }
+            done();
+          });
+      });
+
+      it('Should not allow PATCH on /form/:formId/submission/:subId', (done) => {
+        request(app)
+          .patch(hook.alter('url', `/form/${idorForm._id}/submission/${submissionA._id}`, template))
+          .set('x-jwt-token', template.users.admin.token)
+          .send({
+            data: {
+              name: 'Patched Name',
+            },
+          })
+          .end((err, res) => {
+            if (err) {
+              return done(err);
+            }
+
+            assert(res.statusCode >= 400, `Expected error status but got ${res.statusCode}`);
+            done();
+          });
+      });
     });
   });
 };
