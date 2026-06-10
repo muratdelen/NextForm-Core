@@ -1,3 +1,13 @@
+# NextForm-Core
+
+NextForm-Core is the NextLife platform form management module.
+
+> Upstream: [formio/formio](https://github.com/formio/formio)
+>
+> License notice: This fork retains the upstream project license, copyright notices, and attribution. Review the upstream license before use or distribution.
+
+---
+
 [![Join the chat at https://gitter.im/formio/formio](https://badges.gitter.im/formio/formio.svg)](https://gitter.im/formio/formio?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![StackOverflow](https://www.codewake.com/badges/codewake2.svg)](http://stackoverflow.com/tags/formio)
 
